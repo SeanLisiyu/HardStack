@@ -1,0 +1,165 @@
+mux_cfg={
+  mem_req : 3,
+  mem_bank: 3,
+  mem_data_width :128
+  mem_depth : 128,
+  strategy  : "round"
+}
+_ = require('lodash')
+mem_mux = importDesign('./mem_mux.chdl')
+mem_model = importDesign('./mem_model.chdl')
+class mux_tb extends Module
+  mem_mux_u0 : new mem_mux(mux_cfg.mem_req, mux_cfg.mem_bank, mux_cfg.mem_data_width, mux_cfg.mem_depth, mux_cfg.strategy)
+  constructor: ->
+    super()
+    Mixin importLib('verilog_helpers.chdl')
+    unit_list = []
+    @mem_map={}
+    @mem_model_list =  (new mem_model(mux_cfg.mem_data_width,mux_cfg.mem_depth, 1) for i in _.range(mux_cfg.mem_bank))
+    for mem, bank_idx in @mem_model_list
+      @mem_map['mem_model_'+bank_idx] = mem
+    CellMap(@mem_map)
+      #unit_list.push(CellMap("mem_model_u#{bank_idx}": new mem_model(mux_cfg.mem_data_width,mux_cfg.mem_depth, 1)))
+
+    #console.log(unit_list)
+    @mem_req_num= mux_cfg.mem_req ? 2
+    @mem_bank = mux_cfg.mem_bank ? 2
+    @mem_data_width = mux_cfg.mem_data_width ? 128
+    @mem_depth = mux_cfg.mem_depth ?  128
+    @mem_addr_width = @numWidth(@mem_depth * @mem_bank)
+    @mux_strategy = mux_cfg.strategy
+    Port(
+    )
+
+    Wire(
+    )
+
+    Reg(
+      clk : vreg()
+      rstn: vreg().init(1)
+    )
+
+    Channel(
+      req_channel: channel()
+      mem_channel: channel()
+      mem_port_channel: @createArray(@mem_bank,()=>channel())
+    )
+
+    @mem_mux_u0.bind(
+      mem_req:@req_channel
+      mem:@mem_channel
+    )
+
+    for i in _.range(@mem_bank)
+      @mem_model_list[i].bind(
+        mem_port:@mem_port_channel[i]
+      )
+    @setDefaultClock('clk')
+    @setDefaultReset('rstn')
+
+  mem_wr:(seq, req_reg)->
+    wdata = Math.floor(Math.random()*10000000)
+    addr = Math.floor((Math.random()*1000)) % (@mem_depth*@mem_bank)
+    assign req_reg.valid = 1
+    assign req_reg.we_n  = 0
+    assign req_reg.addr  = hex(@mem_addr_width,addr)
+    assign req_reg.wdata = hex(128,wdata)
+    assign req_reg.rd_valid = 0
+    return wdata
+
+  wait_ready:(seq,req_channel,req_reg, rw, valid)->
+    seq.polling(@clk,$ req_channel.ready) =>
+        assign req_reg.valid = valid
+        assign req_reg.rd_valid = rw
+
+  set_read:(seq, req_reg, num)->
+    seq.delay(10) =>
+      assign req_reg.valid = 1
+      assign req_reg.we_n  = 1
+
+  check_data:(seq, req_channel, req_reg, wdata, data_idx)->
+    seq.polling(@clk,$ req_channel.ready) =>
+      .delay(3) =>
+        $if(req_channel.we_n)
+          @assert_eq(req_channel.rdata, wdata, "wdata_#{data_idx}")
+
+  test:(seq,times,strategy) ->
+    seq.delay(20) =>
+      str = "test "+ times + " " + strategy
+      @display(str)
+
+  build: ->
+    @create_clock(@clk,10)
+    @create_resetn(@rstn)
+
+    for i in _.range(@mem_bank)
+      $channelPortHub(@mem_port_channel[i], @mem_channel[i])
+    #console.log(@req_channel)
+    req_reg = @createArray(@mem_req_num, ()=>
+      return {
+        valid : vreg(1,"valid")
+        addr  : vreg(@mem_addr_width,"addr")
+        we_n  : vreg(1,"we_n")
+        wdata : vreg(@mem_data_width,"wdata")
+        rd_valid : vreg(1,"rd_valid")
+      }
+    )
+
+    for idx in _.range(@mem_req_num)
+      assign @req_channel[idx].valid = req_reg[idx].valid
+      assign @req_channel[idx].we_n = req_reg[idx].we_n
+      assign @req_channel[idx].addr = req_reg[idx].addr
+      assign @req_channel[idx].wdata = req_reg[idx].wdata
+
+    frame_list = []
+    wdata = 0
+    num = @mem_req_num
+    test_num = 3 #Math.floor(Math.random()*10)
+    data_len = 2
+    
+    for i in _.range(num)
+      wdata_list = []
+      initial
+        seq = $sequence("simulation")
+        seq.delay(205) =>
+          for times in _.range(test_num)
+            @test(seq,times,@mux_strategy)
+            for len in _.range(data_len)
+              wdata = @mem_wr(seq,req_reg[i])
+              wdata_list.push(wdata)
+              if len == data_len-1 
+                @wait_ready(seq,@req_channel[i],req_reg[i],0, 0)
+              else
+                @wait_ready(seq,@req_channel[i],req_reg[i],0, 1)
+            @set_read(seq,req_reg[i],num)
+            for len in _.range(data_len)
+              if len == data_len-1 
+                @wait_ready(seq,@req_channel[i],req_reg[i],1, 0)
+              else
+                @wait_ready(seq,@req_channel[i],req_reg[i],1, 1)
+        seq.end()
+      frame_list.push(wdata_list)
+
+    #for i in _.range(num)
+    #  initial
+    #    seq_check = $sequence("check")
+    #    for times in _.range(test_num)
+    #      for len in _.range(data_len)
+    #        data_idx = data_len*times + len
+    #        @check_data(seq_check,@req_channel[i],req_reg[i],frame_list[i][data_idx],i)
+    #    seq_check.end()
+
+    initial
+      $sequence("dump")
+      .init =>
+        @verilog('$dumpfile("mux_tb__1.lxt");')
+        @verilog('$dumpvars(0,mux_tb__1);')
+      .delay(1000) =>
+        #@assert_report()
+        @sim_finish()
+      .end()
+    #initial
+    #  $sequence()
+    #  .end()
+
+module.exports=mux_tb

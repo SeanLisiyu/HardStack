@@ -1,0 +1,379 @@
+_ = require 'lodash'
+class hard_stack extends Module
+  constructor: (stack_reg_num,data_width,mem_depth)->
+    super()
+    Mixin importLib('./private_lib.chdl')
+    @stack_reg_num  = stack_reg_num ? 8
+    @data_width     = data_width ? 64 
+    @mem_depth      = mem_depth ? 128
+    @addr_width     = @numWidth((@mem_depth+@stack_reg_num))
+    @pop_num_width  = @numWidth(@stack_reg_num)
+    #CellMap(name: new cell())
+    create_port = (type) =>
+      if type == "write" or type == "read" 
+        {
+          valid : input()
+          ready : output()
+          grant : output()
+          addr  : input(@addr_width)
+          data  : if type == "write" then input(@data_width) else output(@data_width)
+        }
+      else
+        {
+          valid : input()
+          ready : output()
+          grant : output()
+          data  : if type == "push"  then input(@data_width) else output(@data_width)
+        } 
+
+    Port(
+      mem_req:
+        valid : output()
+        ready : input()
+        we_n  : output()
+        addr  : output(@addr_width)
+        wdata : output(@data_width)
+        rdata : input(@data_width)
+      push    : create_port("push")
+      pop     : create_port("pop")
+      write   : create_port("write")
+      read    : create_port("read")
+      sp      : output(@addr_width) 
+      flush   : input()
+      clear   : input()
+      mem_base_addr : input(@addr_width)
+        
+    )
+
+    Reg(
+      reg_stack:
+        array : @createArray(@stack_reg_num,()=>reg(@data_width).clear("clear"))
+        index : reg(@addr_width).init(@stack_reg_num).clear("clear")
+      stack:
+        sp      : reg(@addr_width).clear("clear")
+        reg_sp  : reg(@addr_width).clear("clear")
+        mem_sp  : reg(@addr_width).clear("clear")
+      mem_op :
+        valid : reg()
+        ready : reg()
+    )
+  
+  $return_2_value:()->
+    Net a
+    Net b
+    return  [a, b]
+  
+  build: ->
+    rd_mem            = wire(1,"rd_mem")
+    wr_mem            = wire(1, "wr_mem")
+    wr_reg            = wire(1, "wr_reg")
+    rd_reg            = wire(1, "rd_reg")
+    rd_mem_state      = reg(1, "rd_mem_state")
+    wr_mem_state      = reg(1, "wr_mem_state")
+    
+    operation = wire(5,"operation")
+    rd_mem_data_valid = wire(1, "rd_mem_data_valid")
+    rd_mem_cnt = reg(2,"rd_mem_cnt")
+    stack_bottom_pos  = reg(@addr_width, "bottom_pos").init(@stack_reg_num)
+    
+
+    addr={
+      reg:
+        rd_addr : wire(@addr_width, "reg_rd_addr")
+        wr_addr : wire(@addr_width, "reg_wr_addr")
+      mem:
+        rd_addr : wire(@addr_width, "mem_rd_addr")
+        wr_addr : wire(@addr_width, "mem_wr_addr")
+    }
+
+
+
+    reg_index={
+      incr : wire(1,"reg_index_incr")
+      decr : wire(1,"reg_index_decr")
+      incr_step : wire(1,"reg_index_incr_step")
+      decr_step : wire(@pop_num_width,"reg_index_decr_step")
+    }
+    
+    reg_mark={
+      push_shift     : wire(1, "reg_mark_push_shift")    # shift reg and index right when push
+      rd_mem_shift   : wire(1, "reg_mark_rd_mem_shift")  # shift reg and index left when rd data from mem then set reg array
+      clear_1_bit    : wire(1, "reg_mark_clear_1_bit")     # clear bit in index when pop
+      clear_all_bit  : wire(1, "reg_mark_clear_all_bit")     # clear bit in index when pop
+      index_to_set   : wire(@addr_width, "reg_index_to_set")
+      index_to_clear : wire(@addr_width, "reg_index_to_clear")
+      set_bit        : wire(1, "reg_mark_set_bit")       # set bit and data when push
+      set_mark       : wire(@stack_reg_num, "set_mark")
+    }
+
+    stack_op = {
+      push_to_reg   : wire(1,"push_to_reg")
+      push_to_mem   : wire(1,"push_to_mem")
+      push_mem_state: reg(1,"push_mem_state")
+      flush_to_mem  : reg(1,"flush_to_mem")
+      reg_pop_data  : wire(@data_width, "reg_pop_data")
+      pop_data      : reg(@data_width, "pop_data")
+      pop_from_mem  : wire(1,"pop_from_mem")
+      pop_from_reg  : wire(1,"pop_from_reg")
+      pop_mem_state : reg(1,"pop_mem_state")
+      pop_mem_idle  : reg(1,"pop_mem_idle")
+    }
+   
+    assign operation = cat([@pop.valid, @push.valid, @write.valid, @read.valid, stack_op.flush_to_mem])
+    
+    assign @sp = @stack.sp 
+    
+    assign reg_index.incr = (@push.valid && @push.grant && (@reg_stack.index < @stack_reg_num)) || (stack_op.pop_mem_idle && rd_mem_data_valid && (@reg_stack.index < @stack_reg_num))
+    assign reg_index.decr = (@pop.valid && @pop.grant && (@reg_stack.index > 0) && (!stack_op.flush_to_mem) )
+    
+    assign reg_index.incr_step = 1
+    assign reg_index.decr_step = 1
+
+
+    assign rd_mem =  @read.valid  && (@read.addr < @stack.mem_sp)   && (!stack_op.flush_to_mem)
+    assign wr_mem =  @write.valid && (@write.addr < @stack.mem_sp)  && (!stack_op.flush_to_mem)
+    assign rd_reg =  @read.valid  && (@read.addr >= @stack.mem_sp)  && (@read.addr < @stack.sp)  && (!stack_op.flush_to_mem) && (!rd_mem_state)
+    assign wr_reg =  @write.valid && (@write.addr >= @stack.mem_sp) && (@write.addr < @stack.sp) && (!stack_op.flush_to_mem) && (!wr_mem_state)
+    
+    Net idle_pop  =  (operation == 0) && (@stack.reg_sp < (@stack_reg_num - 1)) && (@stack.mem_sp > 0) && (!stack_op.pop_mem_idle)
+    Net req_pop   =  @pop.valid && (@stack.reg_sp == 0) && (@stack.mem_sp > 0) && (!stack_op.pop_mem_state)
+    
+    assign stack_op.pop_from_mem =  (idle_pop || req_pop ) && (!stack_op.flush_to_mem)
+    assign stack_op.push_to_mem  =  @push.valid && (@stack.reg_sp == @stack_reg_num) && (!stack_op.flush_to_mem)
+    assign stack_op.pop_from_reg =  @pop.valid  && (@stack.reg_sp > 0) && (!stack_op.flush_to_mem)
+    assign stack_op.push_to_reg  =  @push.valid && (!stack_op.flush_to_mem)
+    
+    assign rd_mem_data_valid = stack_op.pop_mem_state && @mem_op.ready  # reg set
+    
+    assign reg_mark.push_shift   =  stack_op.push_to_reg  && @push.ready && (@reg_stack.index == @stack_reg_num)
+    assign reg_mark.rd_mem_shift =  stack_op.pop_from_mem && idle_pop && rd_mem_data_valid
+    assign reg_mark.clear_1_bit  =  stack_op.pop_from_reg
+    assign reg_mark.clear_all_bit=  stack_op.flush_to_mem || @clear
+    assign reg_mark.set_bit      =  stack_op.push_to_reg  && (@reg_stack.index < @stack_reg_num)
+  
+    assign reg_mark.index_to_set =  @reg_stack.index
+    
+    
+    Net c_test
+    Net d_test
+    assign [c_test,d_test] = $return_2_value()
+    
+    Net set   = @flush && (@stack.reg_sp > 0)
+    Net clear = (@stack.reg_sp == 1) && stack_op.flush_to_mem && @mem_req.ready
+    $signal_latch(clear, set, stack_op.flush_to_mem)
+    
+    Net set   = idle_pop
+    Net clear = stack_op.pop_mem_idle && @mem_op.ready
+    $signal_latch(clear, set, stack_op.pop_mem_idle)
+    
+    Net set   = stack_op.pop_from_mem
+    Net clear = @mem_op.ready && stack_op.pop_mem_state
+    $signal_latch(clear, set, stack_op.pop_mem_state)
+    
+    Net set   = stack_op.push_to_mem
+    Net clear = @push.ready
+    $signal_latch(clear, set, stack_op.push_mem_state)
+    
+    
+    Net set   = wr_mem
+    Net clear = @write.ready
+    $signal_latch(clear, set, wr_mem_state)
+    
+    Net set   = rd_mem
+    Net clear = @read.ready && rd_mem_state
+    $signal_latch(clear, set, rd_mem_state)
+    
+    always
+      $if((@stack.reg_sp == 1) && stack_op.flush_to_mem && @mem_req.ready)
+        assign stack_bottom_pos = 0
+      $elseif(reg_mark.push_shift && stack_bottom_pos > 0)
+        assign stack_bottom_pos = stack_bottom_pos - 1
+      $else
+        assign stack_bottom_pos = stack_bottom_pos
+
+    $pointer_operation_with_clear(reg_index.decr, reg_index.incr, reg_mark.clear_all_bit, @reg_stack.index)
+    
+
+    Net sel = rd_reg
+    Net(in_a, @addr_width) = @read.addr - @stack.mem_sp + stack_bottom_pos 
+    Net(in_b, @addr_width) = @stack_reg_num
+    $signal_mux(in_a, in_b, sel, addr.reg.rd_addr)
+
+    Net sel = wr_reg
+    Net(in_a, @addr_width) = @write.addr - @stack.mem_sp + stack_bottom_pos
+    Net(in_b, @addr_width) = @stack_reg_num
+    $signal_mux(in_a, in_b, sel, addr.reg.wr_addr)
+
+    Net sel = wr_reg
+    Net(in_a, @addr_width) = @read.addr
+    Net(in_b, @addr_width) = 0
+    $signal_mux(in_a, in_b, sel, addr.mem.rd_addr)
+    
+    Net sel = wr_mem
+    Net(in_a, @addr_width) = @write.addr
+    Net(in_b, @addr_width) = 0
+    $signal_mux(in_a, in_b, sel, addr.mem.wr_addr)
+    
+    Net sel = reg_mark.clear_1_bit
+    Net(in_a, @addr_width) = (@reg_stack.index - 1)
+    Net(in_b, @addr_width) = @stack_reg_num
+    $signal_mux(in_a, in_b, sel, reg_mark.index_to_clear)
+
+    for i in _.range(@stack_reg_num)
+      if i == 0
+        always
+          $if(reg_mark.push_shift)
+            assign @reg_stack.array[i] = @reg_stack.array[i+1]
+          $elseif(stack_op.flush_to_mem && @mem_req.ready)
+            assign @reg_stack.array[i] = @reg_stack.array[i+1]
+          $elseif(rd_mem_data_valid && stack_op.pop_mem_idle)
+            assign @reg_stack.array[i] = @mem_req.rdata
+          $elseif(reg_mark.set_bit && (reg_mark.index_to_set == i))
+            assign @reg_stack.array[i] = @push.data
+          $elseif(wr_reg && (addr.reg.wr_addr == i))
+            assign @reg_stack.array[i] = @write.data
+          $else
+            assign @reg_stack.array[i] = @reg_stack.array[i]
+      else if i ==  (@stack_reg_num-1)
+        always
+          $if(reg_mark.push_shift)
+            assign @reg_stack.array[i] = @push.data
+          $elseif(rd_mem_data_valid && stack_op.pop_mem_idle)
+            assign @reg_stack.array[i] = @reg_stack.array[i-1]
+          $elseif(reg_mark.set_bit && (reg_mark.index_to_set == i))
+            assign @reg_stack.array[i] = @push.data
+          $elseif(wr_reg && (addr.reg.wr_addr == i))
+            assign @reg_stack.array[i] = @write.data
+          $else
+            assign @reg_stack.array[i] = @reg_stack.array[i]
+      else
+        always
+          $if(reg_mark.push_shift)
+            assign @reg_stack.array[i] = @reg_stack.array[i+1]
+          $elseif(stack_op.flush_to_mem && @mem_req.ready)
+            assign @reg_stack.array[i] = @reg_stack.array[i+1]
+          $elseif(rd_mem_data_valid && stack_op.pop_mem_idle)
+            assign @reg_stack.array[i] = @reg_stack.array[i-1]
+          $elseif(reg_mark.set_bit && (reg_mark.index_to_set == i))
+            assign @reg_stack.array[i] = @push.data
+          $elseif(wr_reg && (addr.reg.wr_addr == i))
+            assign @reg_stack.array[i] = @write.data
+          $else
+            assign @reg_stack.array[i] = @reg_stack.array[i]
+
+
+    pop_out_list = []
+    for i in _.range(@stack_reg_num)
+      pop_out_list.push($cond(reg_mark.index_to_clear==i) => @reg_stack.array[i] )
+    assign stack_op.reg_pop_data = $balance(pop_out_list,@data_width)
+    
+    assign stack_op.pop_data = @pop.data
+     
+    assign @pop.data
+      $if(stack_op.pop_from_reg)
+        $ stack_op.reg_pop_data
+      $elseif(stack_op.pop_mem_state && @mem_op.ready && (!stack_op.pop_mem_idle))
+        $ @mem_req.rdata
+      $else
+        $ stack_op.pop_data
+   
+    Net reg_sp_incr = (stack_op.push_to_reg && (@stack.reg_sp < @stack_reg_num)) || (@mem_op.ready && stack_op.pop_mem_idle)
+    Net reg_sp_decr = stack_op.pop_from_reg && (@stack.reg_sp >= 1 ) || (stack_op.flush_to_mem && @mem_req.ready)
+    $pointer_operation(reg_sp_decr, reg_sp_incr, @stack.reg_sp)
+    
+    Net mem_sp_incr = stack_op.push_to_mem && @push.ready || stack_op.flush_to_mem && @mem_req.ready
+    Net mem_sp_decr = stack_op.pop_mem_state && @mem_op.valid && @mem_req.ready && ( @stack.mem_sp > 0 )
+    $pointer_operation(mem_sp_decr, mem_sp_incr, @stack.mem_sp)
+    
+    Net sp_incr = @push.valid && @push.grant
+    Net sp_decr = @pop.valid && (@stack.sp) > 0 && @pop.grant
+    $pointer_operation(sp_decr, sp_incr, @stack.sp) 
+
+
+    assign @mem_op.ready = @mem_req.ready    
+    
+    
+    Net sel = stack_op.pop_mem_state
+    Net in_a = @mem_op.valid
+    Net in_b = rd_mem | wr_mem | stack_op.push_to_mem | stack_op.flush_to_mem
+    $signal_mux(in_a, in_b, sel, @mem_req.valid)
+         
+    Net sel = stack_op.pop_mem_state && @mem_op.valid || rd_mem
+    Net in_a = 1
+    Net in_b = 0
+    $signal_mux(in_a, in_b, sel, @mem_req.we_n)
+    
+    assign @mem_req.addr 
+      $if(stack_op.pop_from_mem || stack_op.pop_mem_state)
+        $ @stack.mem_sp - 1 + @mem_base_addr
+      $elseif(stack_op.push_to_mem || stack_op.flush_to_mem)
+        $ @stack.mem_sp + @mem_base_addr
+      $elseif(rd_mem)
+        $ addr.mem.rd_addr + @mem_base_addr
+      $elseif(wr_mem)
+        $ addr.mem.wr_addr + @mem_base_addr
+      $else => $ 0
+    
+    flush_data_list=[]
+    for i in _.range(@stack_reg_num)
+      flush_data_list.push($cond(stack_bottom_pos==i) => $ @reg_stack.array[i]) 
+      
+    Net(flush_data,@data_width) = $balance(flush_data_list,@data_width)
+    
+    assign @mem_req.wdata
+      $if(wr_mem)
+        $ @write.data
+      $elseif(stack_op.flush_to_mem)
+        $ flush_data
+      $else 
+        $ @reg_stack.array[0]
+        
+    Net valid_rst = @mem_op.valid && @mem_req.ready && stack_op.pop_mem_state  
+    Net set   = stack_op.pop_from_mem
+    Net clear = valid_rst
+    $signal_latch(clear, set, @mem_op.valid)
+    
+    Net sel = !stack_op.push_to_mem && @push.valid
+    Net in_a = (operation == 5'b01000')
+    Net in_b = @mem_req.ready && (stack_op.push_mem_state || stack_op.push_to_mem)
+    $signal_mux(in_a, in_b, sel, @push.grant)
+    
+    assign @push.ready = @push.grant
+    
+    Net sel = stack_op.pop_from_reg
+    Net in_a = 1
+    Net in_b = ((stack_op.pop_mem_state) && (!stack_op.pop_mem_idle)) && @mem_req.ready
+    $signal_mux(in_a, in_b, sel, @pop.grant)
+    
+    Net sel = stack_op.pop_from_reg
+    Net in_a = 1
+    Net in_b = ((stack_op.pop_mem_state) && (!stack_op.pop_mem_idle)) && @mem_op.ready
+    $signal_mux(in_a, in_b, sel, @pop.ready)
+    
+    Net sel = wr_reg
+    Net in_a = (operation == 5'b00100')
+    Net in_b = @mem_req.ready && (!stack_op.flush_to_mem) && (operation == 5'b00100') && (wr_mem || wr_mem_state)
+    $signal_mux(in_a, in_b, sel, @write.grant)
+    
+    assign @write.ready = @write.grant
+     
+    Net sel = rd_reg
+    Net in_a = (operation == 5'b00010')
+    Net in_b = @mem_req.ready && (rd_mem_state || rd_mem)
+    $signal_mux(in_a, in_b, sel, @read.grant)
+    
+    Net sel = rd_reg
+    Net in_a = (operation == 5'b00010')
+    Net in_b = @mem_op.ready && (rd_mem_state)
+    $signal_mux(in_a, in_b, sel, @read.ready)
+    
+    read_data_list = [] 
+    for i in _.range(@stack_reg_num)
+      read_data_list.push($cond(rd_reg && (addr.reg.rd_addr == i)) => $ @reg_stack.array[i])
+    read_data_list.push($cond(@read.ready) => $ @mem_req.rdata)
+    assign @read.data = $balance(read_data_list, @data_width)
+    
+    
+    
+     
+module.exports=hard_stack

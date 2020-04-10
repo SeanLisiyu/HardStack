@@ -1,0 +1,59 @@
+_ = require 'lodash'
+class mem_model extends Module
+  constructor: (data_width, data_depth, delay)->
+    super()
+    @data_width = data_width ? 128
+    @data_depth = data_depth ? 128
+    @addr_width = @numWidth(@data_depth)
+    @delay = delay ? 1
+    Port(
+      mem_port:
+        addr  : input(@addr_width)
+        wdata : input(@data_width)
+        rdata : output(@data_width)
+        we_n  : input()
+        ce_n  : input()
+    )
+    Mem(
+      mem:vec(@data_width,@data_depth)
+    )
+    Wire(
+     rd_data : wire(@data_width)
+    )
+
+    Reg(
+      rd_data_dly : reg(@data_width)
+      port:
+        ce_n: reg()
+        we_n: reg()
+        addr: reg(@addr_width)
+        wdata:reg(@data_width)
+    )
+
+    Channel(
+    )
+
+  build: ->
+    assign(@port.ce_n) =  @mem_port.ce_n
+    assign(@port.we_n) =  @mem_port.we_n
+    assign(@port.addr) =  @mem_port.addr
+    assign(@port.wdata) = @mem_port.wdata
+    always
+      $if((!@port.ce_n) && (!@port.we_n))
+        @mem.set(@port.addr,$ @port.wdata)
+
+    Net(addr_t, @addr_width) = @mem_port.addr
+    assign @rd_data
+      $if((!@mem_port.ce_n) && @mem_port.we_n)
+        $ @mem.get(addr_t)
+      $else
+        $ hex(@data_width,0)
+
+    assign @rd_data_dly = @rd_data
+
+    if @delay
+      assign @mem_port.rdata = @rd_data_dly
+    else
+      assign @mem_port.rdata = @rd_data
+
+module.exports=mem_model

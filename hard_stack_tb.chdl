@@ -1,0 +1,322 @@
+mux_cfg={
+  mem_req : 3,
+  mem_bank: 3,
+  mem_data_width : 32
+  mem_depth : 128,
+  strategy  : "round"
+}
+stack_cfg={
+  stack_num  : mux_cfg.mem_req
+  stack_reg_num : 4 
+  data_width : 32
+  mem_depth  : mux_cfg.mem_depth*mux_cfg.mem_bank
+}
+_ = require 'lodash'
+hard_stack = importDesign('./hard_stack.chdl')
+mem_mux   = importDesign('./mem_mux.chdl')
+mem_model = importDesign('./mem_model.chdl')
+class hard_stack_tb extends Module
+  mem_mux_u0 : new mem_mux(mux_cfg.mem_req, mux_cfg.mem_bank, mux_cfg.mem_data_width, mux_cfg.mem_depth, mux_cfg.strategy)
+  constructor: ->
+    super()
+    
+    Mixin importLib('verilog_helpers.chdl') 
+    #stack parameter
+    
+    @period = 10
+    
+    @stack_reg_num = stack_cfg.stack_reg_num
+    @data_width = stack_cfg.data_width
+    @mem_depth  = stack_cfg.mem_depth
+    @stack_num  = stack_cfg.stack_num
+    @num_width  = @numWidth(stack_cfg.stack_num)
+    #CellMap(name: new cell())
+    
+    #mem_mux parameter 
+    @addr_width = @numWidth(@mem_depth)
+    @mem_req_num= mux_cfg.mem_req ? 2
+    @mem_bank = mux_cfg.mem_bank ? 2
+    @mem_data_width = mux_cfg.mem_data_width ? 128
+    @mem_depth = mux_cfg.mem_depth ?  128
+    @mem_addr_width = @numWidth(@mem_depth * @mem_bank)
+    @mux_strategy = mux_cfg.strategy
+    
+     
+    @stack_map = {}
+    @stack_unit_list = (new hard_stack(stack_cfg.stack_reg_num, stack_cfg.data_width,stack_cfg.mem_depth) for i in _.range(@stack_num)) 
+    
+    for stack_unit,idx in @stack_unit_list
+      @stack_map["stack_unit_u#{idx}"] = stack_unit
+    
+    CellMap(@stack_map)
+
+    
+    @mem_map={}
+    @mem_model_list =  (new mem_model(mux_cfg.mem_data_width,mux_cfg.mem_depth, 1) for i in _.range(mux_cfg.mem_bank))
+    for mem, bank_idx in @mem_model_list
+      @mem_map['mem_model_'+bank_idx] = mem
+    CellMap(@mem_map)
+
+    Reg(
+      clk : vreg()
+      rstn : vreg().init(1)
+    )
+    
+
+    Channel(
+      mem_req_ch   : @createArray(@stack_num,()=>channel())
+      pop_ch       : @createArray(@stack_num,()=>channel()) 
+      push_ch      : @createArray(@stack_num,()=>channel())
+      write_ch     : @createArray(@stack_num,()=>channel())
+      read_ch      : @createArray(@stack_num,()=>channel())
+      sp_ch        : @createArray(@stack_num,()=>channel())
+      flush_ch     : @createArray(@stack_num,()=>channel())
+      mem_base_ch  : @createArray(@stack_num,()=>channel())
+    )
+    
+    Channel(
+      req_channel: channel()
+      mem_channel: channel()
+      mem_port_channel: @createArray(@mem_bank,()=>channel())
+    )
+    
+    
+    for stack_unit,idx in @stack_unit_list 
+      stack_unit.bind(
+        mem_req : @mem_req_ch[idx]    
+        push : @push_ch[idx]
+        pop  : @pop_ch[idx]
+        write: @write_ch[idx]
+        read : @read_ch[idx]
+        sp   : @sp_ch[idx]        
+        flush: @flush_ch[idx] 
+        mem_base_addr : @mem_base_ch[idx]
+      ) 
+    
+    @mem_mux_u0.bind(
+      mem_req:@req_channel
+      mem:@mem_channel
+    )
+
+    for i in _.range(@mem_bank)
+      @mem_model_list[i].bind(
+        mem_port:@mem_port_channel[i]
+    )
+    
+            
+    @setDefaultClock('clk')
+    @setDefaultReset('rstn')
+  
+  op_push:(seq,stack_in, push_ch)->
+    data = Math.floor(Math.random()*1000)
+    seq.delay(0) =>
+      assign stack_in.push.valid = 1
+      assign stack_in.push.data = data
+    seq.polling(@clk, $ push_ch.grant) => 
+      assign stack_in.push.valid = 0
+    return data
+  
+  check_pop_data:(seq, stack_in, pop_ch,data) ->
+    seq.polling(@clk, $ pop_ch.ready) =>
+      @display("check pop data")
+      @assert_eq(pop_ch.data, data, "pop_data")
+  
+  op_pop:(seq,stack_in,pop_ch)->
+    seq.delay(0) =>
+      assign stack_in.pop.valid = 1
+      assign stack_in.pop.grant_hold = 0
+    seq.polling(@clk, $ pop_ch.grant) =>
+      assign stack_in.pop.valid = 0 
+      assign stack_in.pop.grant_hold = 1
+      
+  op_store:(seq, stack_in, write_ch, addr)->
+    data = Math.floor(Math.random()*1000)
+    seq.delay(0) =>
+      assign stack_in.write.valid = 1
+      assign stack_in.write.data = data
+      assign stack_in.write.addr = addr
+    seq.polling(@clk, $ write_ch.grant) =>
+      assign stack_in.write.valid = 0
+    return data
+  
+  op_load:(seq, stack_in, read_ch, addr)->
+    seq.delay(0) =>
+      assign stack_in.read.valid = 1
+      assign stack_in.read.addr = addr
+    seq.polling(@clk, $ read_ch.grant) =>
+      assign stack_in.read.valid = 0 
+  
+  check_load_data:(seq, stack_in, read_ch, data) ->
+    seq.polling(@clk, $ read_ch.ready) =>
+      @display("check read data")
+      @assert_eq(read_ch.data, data, "read_data")
+  
+  flush:(seq,stack_in) ->
+    seq.delay(@period) =>
+      assign stack_in.flush = 1
+    seq.delay(@period) =>
+      assign stack_in.flush = 0
+    
+  build: ->
+    @create_clock(@clk,@period) 
+    @create_resetn(@rstn)                   # there is a 100 unit time delay
+    
+    
+    for i in _.range(@mem_bank)
+      $channelPortHub(@mem_port_channel[i], @mem_channel[i])
+      
+    for i in _.range(@stack_num)
+      $channelPortHub(@req_channel[i], @mem_req_ch[i])
+    
+    
+    stack_in=@createArray(@stack_num,()=>
+      return {
+        pop:
+          valid : vreg(1, "pop_valid")
+          num   : vreg(@num_width, "pop_num")
+          grant_hold : vreg(1, "pop_grant_hold")
+        push:
+          valid : vreg(1, "push_valid")
+          data  : vreg(@data_width, "push_data")
+        write:
+          valid : vreg(1, "write_valid")
+          addr  : vreg(@addr_width, "write_addr")
+          data  : vreg(@data_width, "write_data")
+        read:
+          valid : vreg(1, "read_valid")
+          addr  : vreg(@addr_width, "read_addr")
+          grant_hold :vreg(1, "read_grant_hold")
+        flush   : vreg(1, "flush")
+        mem_base_addr : vreg(@addr_width, "mem_addr_base")
+        }    
+      )
+    
+    for i in _.range(@stack_num)
+      assign @pop_ch[i].valid   = stack_in[i].pop.valid
+      assign @push_ch[i].valid  = stack_in[i].push.valid
+      assign @push_ch[i].data   = stack_in[i].push.data
+      assign @write_ch[i].valid = stack_in[i].write.valid
+      assign @write_ch[i].data  = stack_in[i].write.data
+      assign @write_ch[i].addr  = stack_in[i].write.addr
+      assign @read_ch[i].valid  = stack_in[i].read.valid
+      assign @read_ch[i].addr   = stack_in[i].read.addr
+      assign @flush_ch[i]       = stack_in[i].flush
+      assign @mem_base_ch[i]    = stack_in[i].mem_base_addr 
+      
+    stack_unit = [] 
+    stack_unit_pop_data = []
+    for i in _.range(@stack_num) 
+      stack_data = []
+      pop_data_list = []
+      stack_write_data = []
+      initial
+        seq = $sequence("simulation") 
+        seq.delay(10) =>
+          assign stack_in[i].mem_base_addr = i*10
+        #console.log("while")
+        seq.delay(105) =>
+          data = @op_push(seq, stack_in[i],@push_ch[i])
+          stack_data.push(data)
+          data = @op_push(seq, stack_in[i],@push_ch[i])
+          stack_data.push(data)
+          
+          @op_pop(seq,stack_in[i], @pop_ch[i])
+          pop_data_list.push(stack_data.pop()) 
+          
+          data = @op_push(seq, stack_in[i],@push_ch[i])
+          stack_data.push(data)
+          data = @op_push(seq, stack_in[i],@push_ch[i])
+          stack_data.push(data)
+          
+          data = @op_push(seq, stack_in[i],@push_ch[i])
+          stack_data.push(data)
+          data = @op_push(seq, stack_in[i],@push_ch[i])
+          stack_data.push(data)
+          
+          data = @op_store(seq, stack_in[i],@write_ch[i], 0)
+          stack_write_data.push(data)
+          stack_data.push(data)
+          data = @op_store(seq, stack_in[i],@write_ch[i], 1)
+          stack_write_data.push(data)
+          stack_data.push(data)
+          data = @op_store(seq, stack_in[i],@write_ch[i], 2)
+          stack_write_data.push(data)
+          stack_data.push(data)
+          data = @op_store(seq, stack_in[i],@write_ch[i], 3)
+          stack_write_data.push(data)
+          stack_data.push(data)
+          data = @op_store(seq, stack_in[i],@write_ch[i], 4)
+          stack_write_data.push(data)
+          stack_data.push(data)
+         # data = @op_store(seq, stack_in[i],@write_ch[i], 5)
+         # stack_data[5] = data
+          console.log(stack_write_data)
+          
+          @op_load(seq,stack_in[i],@read_ch[i],0)
+          @op_load(seq,stack_in[i],@read_ch[i],1)
+          @op_load(seq,stack_in[i],@read_ch[i],2)
+          @op_load(seq,stack_in[i],@read_ch[i],3)
+          @op_load(seq,stack_in[i],@read_ch[i],4)
+          #@op_load(seq,stack_in[i],@read_ch[i],5)
+          
+          @op_pop(seq,stack_in[i], @pop_ch[i])
+          pop_data_list.push(stack_data.pop()) 
+          @op_pop(seq,stack_in[i], @pop_ch[i])
+          pop_data_list.push(stack_data.pop()) 
+          @op_pop(seq,stack_in[i], @pop_ch[i])
+          pop_data_list.push(stack_data.pop()) 
+          @op_pop(seq,stack_in[i], @pop_ch[i])
+          pop_data_list.push(stack_data.pop()) 
+          @flush(seq, stack_in[i])
+          @op_pop(seq,stack_in[i], @pop_ch[i])
+          pop_data_list.push(stack_data.pop()) 
+          
+          console.log("pop data :" + pop_data_list)
+        seq.end()
+      stack_unit.push(stack_write_data) 
+      stack_unit_pop_data.push(pop_data_list) 
+      
+     
+    for i in _.range(@stack_num) 
+      console.log(stack_unit[i])
+      initial
+        seq = $sequence("check")
+        seq.delay(5) =>
+          
+          #pop_data = stack_unit[i][1]
+          #pop_data = stack_unit[i].pop()
+          pop_data = stack_unit_pop_data[i][0]
+          @check_pop_data(seq, stack_in[i], @pop_ch[i], pop_data) 
+          
+          load_data = stack_unit[i][0]
+          @check_load_data(seq, stack_in[i], @read_ch[i], load_data) 
+          load_data = stack_unit[i][1]
+          @check_load_data(seq, stack_in[i], @read_ch[i], load_data) 
+          load_data = stack_unit[i][2]
+          @check_load_data(seq, stack_in[i], @read_ch[i], load_data) 
+          load_data = stack_unit[i][3]
+          @check_load_data(seq, stack_in[i], @read_ch[i], load_data) 
+          load_data = stack_unit[i][4]
+          @check_load_data(seq, stack_in[i], @read_ch[i], load_data) 
+          
+          
+          pop_data = stack_unit_pop_data[i][1]
+          @check_pop_data(seq, stack_in[i], @pop_ch[i], pop_data) 
+          pop_data = stack_unit_pop_data[i][2]
+          @check_pop_data(seq, stack_in[i], @pop_ch[i], pop_data) 
+          pop_data = stack_unit_pop_data[i][3]
+          @check_pop_data(seq, stack_in[i], @pop_ch[i], pop_data) 
+          pop_data = stack_unit_pop_data[i][4]
+          @check_pop_data(seq, stack_in[i], @pop_ch[i], pop_data) 
+          pop_data = stack_unit_pop_data[i][5]
+          @check_pop_data(seq, stack_in[i], @pop_ch[i], pop_data) 
+        seq.end()
+       
+    initial
+      $sequence("finish")
+        .delay(1000) =>
+          @assert_report()
+          @sim_finish()
+        .end()
+    
+module.exports=hard_stack_tb

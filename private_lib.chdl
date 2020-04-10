@@ -1,0 +1,61 @@
+module.exports={
+    #  signal_latch
+    #  disbale : verilog wire/reg
+    #  able    : verilog wire/reg
+    #  signal_in : verilog reg
+    #
+    $signal_latch:(disable, able, signal_in) ->
+      always
+        $if(disable)
+          assign signal_in = 0
+        $elseif(able)
+          assign signal_in = 1
+        $else
+          assign signal_in = signal_in
+    
+    #
+    #  pointer_operation
+    #  decr : verilog wire/reg
+    #  incr : verilog wire/reg
+    #  pointer : verilog reg
+    $pointer_operation:(decr, incr, pointer) ->
+      always 
+        $if(decr)
+          assign pointer = pointer - 1
+        $elseif(incr)
+          assign pointer = pointer + 1
+        $else 
+          assign pointer = pointer
+    
+    #
+    #  pointer_operation
+    #  decr : verilog wire/reg
+    #  incr : verilog wire/reg
+    #  clear: verilog wire/reg
+    #  pointer : verilog reg
+    # 
+    $pointer_operation_with_clear:(decr, incr, clear, pointer) ->
+      always 
+        $if(clear)
+          assign pointer = 0
+        $elseif(decr)
+          assign pointer = pointer - 1
+        $elseif(incr)
+          assign pointer = pointer + 1
+        $else 
+          assign pointer = pointer
+    #
+    #  signal_mux 
+    #  sel_en_a : verilog wire/reg 
+    #  sel_in_a : verilog wire/reg
+    #  sel_in_b : verilog wire/reg
+    #  out      : verilog wire/reg
+    #
+    $signal_mux:(in_a, in_b, sel, out) ->
+      assign out
+        $if(sel)
+          $ in_a
+        $else
+          $ in_b
+      
+}

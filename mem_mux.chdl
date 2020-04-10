@@ -1,0 +1,118 @@
+_=require('lodash')
+class mem_mux extends Module
+  constructor: (req_num, mem_bank, mem_data_width, mem_depth, strategy)->
+    super()
+    Mixin importLib('chdl_component_lib.chdl')
+    @req_num=req_num ? 2
+    @mem_bank=mem_bank ? 2
+    @mem_data_width=mem_data_width ? 32
+    @mem_depth=mem_depth ? 128
+    @req_addr_width = @numWidth(@mem_depth*@mem_bank)
+    @mem_addr_width = @numWidth(@mem_depth)
+    @strategy=strategy ? "round" # “fix ” or "round"
+    #CellMap(name: new cell())
+    Port(
+      mem_req:@createArray(@req_num, ()=>
+              return {
+                  valid: input(1)
+                  ready: output(1)
+                  we_n : input(1)
+                  addr : input(@req_addr_width)
+                  rdata: output(@mem_data_width)
+                  wdata: input(@mem_data_width)
+              })
+      mem   :@createArray(@mem_bank,()=>
+              return {
+                ce_n : output()
+                we_n : output()
+                addr : output(@mem_addr_width)
+                rdata: input(@mem_data_width)
+                wdata: output(@mem_data_width)
+      })
+    )
+
+
+  build: ->
+    mem_sel=@createArray(@mem_bank,()=>
+      return{
+        ce : @createArray(@mem_bank,()=>wire(1, "mem_sel"))
+        idx : wire(@numWidth(@mem_bank),"mem_sel_idx")
+        idx_dly: reg(@numWidth(@mem_bank),"mem_sel_idx_dly")
+      }
+    )
+    mux2req = @createArray(@req_num,()=>
+      return{
+        ready_dly : reg(1, "mux2req_ready_dly")
+        ready     : wire(1, "mux2req_ready")
+      }
+    )
+
+    mem = @createArray(@mem_bank,()=>
+      return  {
+        start_addr : 0
+        end_addr : 0
+      }
+    )
+
+    for bank in _.range(@mem_bank)
+      mem[bank].start_addr = bank*@mem_depth
+      mem[bank].end_addr = bank*@mem_depth + @mem_depth - 1
+
+    bank_list=[]
+    for bank in _.range(@mem_bank)
+      for req_idx in _.range(@req_num)
+        Net t  = $inRange(@mem_req[req_idx].addr, mem[bank].start_addr ,mem[bank].end_addr, true, false)
+        assign mem_sel[bank].ce[req_idx] #= $balance(cond_list, 1)
+          $if(t)
+            $ @mem_req[req_idx].valid
+          $else
+            $ bin(1,0)
+      #bank_list.push(ce_list)
+
+    if @strategy == "fix"
+      for bank,idx in mem_sel
+        #console.log(bank)
+        assign mem_sel[idx].idx = $fix_arbiter(bank.ce,@mem_bank)
+        assign mem_sel[idx].idx_dly = mem_sel[idx].idx
+    else
+      for bank,idx in mem_sel
+        #console.log(idx)
+        assign mem_sel[idx].idx = $round_arbiter(bank.ce,bin(1,1),@mem_bank)
+        assign mem_sel[idx].idx_dly = mem_sel[idx].idx
+    for idx in _.range(@req_num)
+      ready_list=[]
+      rdata_list=[]
+      for bank in _.range(@mem_bank)
+        ready_list.push($cond(mem_sel[bank].idx == idx) => $ bin(1,1))
+        rdata_list.push($cond(mem_sel[bank].idx_dly == idx) => $ @mem[bank].rdata)
+      ready_list.push($cond() => $ 0)
+      assign mux2req[idx].ready = $order(ready_list,bin(1,0))
+      assign @mem_req[idx].rdata = $balance(rdata_list,@mem_data_width)
+
+    for idx in _.range(@req_num)
+      assign mux2req[idx].ready_dly = mux2req[idx].ready
+      assign @mem_req[idx].ready = mux2req[idx].ready
+        #$if(@mem_req[idx].we_n && @mem_req[idx].valid)
+        #  $ mux2req[idx].ready_dly
+        #$else
+        #  $ mux2req[idx].ready
+
+    for bank in _.range(@mem_bank)
+      we_n_list = []
+      wdata_list = []
+      addr_list = []
+      ce_n_list = []
+      for idx in _.range(@req_num)
+        we_n_list.push($cond((mem_sel[bank].idx == idx) && mem_sel[bank].ce[idx]) => $ @mem_req[idx].we_n)
+        ce_n_list.push($cond((mem_sel[bank].idx == idx) && mem_sel[bank].ce[idx]) => $ (!@mem_req[idx].valid))
+        wdata_list.push($cond((mem_sel[bank].idx == idx) && mem_sel[bank].ce[idx]) => $ @mem_req[idx].wdata)
+        addr_list.push($cond((mem_sel[bank].idx == idx)&& mem_sel[bank].ce[idx]) => $ (@mem_req[idx].addr))
+      ce_n_list.push($cond(null) => $ bin(1,1))
+      Net(addr_t,@req_addr_width) = $balance(addr_list,@req_addr_width)
+      Net(mem_addr_t,@req_addr_width) = addr_t - mem[bank].start_addr
+      assign @mem[bank].addr = mem_addr_t(0,@mem_addr_width)
+      assign @mem[bank].wdata = $balance(wdata_list,@mem_data_width)
+      assign @mem[bank].we_n = $balance(we_n_list,1)
+      assign @mem[bank].ce_n = $order(ce_n_list)
+
+module.exports=mem_mux
