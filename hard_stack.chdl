@@ -58,12 +58,18 @@ class hard_stack extends Module
         ready : reg()
     )
   
-  $return_2_value:()->
+  return_2_value:()->
     Net a
     Net b
-    return  [a, b]
+    list=[]
+    list.push($ a)
+    list.push($ b)
+    return  list
   
   build: ->
+    
+    #console.log(op_flow.read())
+    
     rd_mem            = wire(1,"rd_mem")
     wr_mem            = wire(1, "wr_mem")
     wr_reg            = wire(1, "wr_reg")
@@ -138,10 +144,10 @@ class hard_stack extends Module
     Net idle_pop  =  (operation == 0) && (@stack.reg_sp < (@stack_reg_num - 1)) && (@stack.mem_sp > 0) && (!stack_op.pop_mem_idle)
     Net req_pop   =  @pop.valid && (@stack.reg_sp == 0) && (@stack.mem_sp > 0) && (!stack_op.pop_mem_state)
     
-    assign stack_op.pop_from_mem =  (idle_pop || req_pop ) && (!stack_op.flush_to_mem)
+    assign stack_op.pop_from_mem =  (idle_pop || req_pop ) && (!stack_op.flush_to_mem) && (!stack_op.pop_mem_idle)
     assign stack_op.push_to_mem  =  @push.valid && (@stack.reg_sp == @stack_reg_num) && (!stack_op.flush_to_mem)
     assign stack_op.pop_from_reg =  @pop.valid  && (@stack.reg_sp > 0) && (!stack_op.flush_to_mem)
-    assign stack_op.push_to_reg  =  @push.valid && (!stack_op.flush_to_mem)
+    assign stack_op.push_to_reg  =  @push.valid && (!stack_op.flush_to_mem) && (!stack_op.pop_mem_idle)
     
     assign rd_mem_data_valid = stack_op.pop_mem_state && @mem_op.ready  # reg set
     
@@ -156,7 +162,7 @@ class hard_stack extends Module
     
     Net c_test
     Net d_test
-    assign [c_test,d_test] = $return_2_value()
+    assign [c_test,d_test] = @return_2_value()
     
     Net set   = @flush && (@stack.reg_sp > 0)
     Net clear = (@stack.reg_sp == 1) && stack_op.flush_to_mem && @mem_req.ready
@@ -277,13 +283,24 @@ class hard_stack extends Module
       $else
         $ stack_op.pop_data
    
-    Net reg_sp_incr = (stack_op.push_to_reg && (@stack.reg_sp < @stack_reg_num)) || (@mem_op.ready && stack_op.pop_mem_idle)
-    Net reg_sp_decr = stack_op.pop_from_reg && (@stack.reg_sp >= 1 ) || (stack_op.flush_to_mem && @mem_req.ready)
-    $pointer_operation(reg_sp_decr, reg_sp_incr, @stack.reg_sp)
+    Net(reg_sp_incr,1)
+    Net(reg_sp_decr,1)
+    
+    assign reg_sp_incr = ((stack_op.push_to_reg && (@stack.reg_sp < @stack_reg_num)) || (@mem_op.ready && stack_op.pop_mem_idle))
+    assign reg_sp_decr = (stack_op.pop_from_reg && (@stack.reg_sp >= 1 ) || (stack_op.flush_to_mem && @mem_req.ready))
+    
+    Net reg_sp_incr_cond = reg_sp_incr && (!reg_sp_decr)
+    Net reg_sp_decr_cond = reg_sp_decr && (!reg_sp_incr)
+    
+    $pointer_operation(reg_sp_decr_cond, reg_sp_incr_cond, @stack.reg_sp)
     
     Net mem_sp_incr = stack_op.push_to_mem && @push.ready || stack_op.flush_to_mem && @mem_req.ready
     Net mem_sp_decr = stack_op.pop_mem_state && @mem_op.valid && @mem_req.ready && ( @stack.mem_sp > 0 )
-    $pointer_operation(mem_sp_decr, mem_sp_incr, @stack.mem_sp)
+    
+    Net mem_sp_incr_cond = mem_sp_incr && (! mem_sp_decr)
+    Net mem_sp_decr_cond = mem_sp_decr && (! mem_sp_incr)
+    
+    $pointer_operation(mem_sp_decr_cond, mem_sp_incr_cond, @stack.mem_sp)
     
     Net sp_incr = @push.valid && @push.grant
     Net sp_decr = @pop.valid && (@stack.sp) > 0 && @pop.grant
@@ -333,8 +350,8 @@ class hard_stack extends Module
     Net clear = valid_rst
     $signal_latch(clear, set, @mem_op.valid)
     
-    Net sel = !stack_op.push_to_mem && @push.valid
-    Net in_a = (operation == 5'b01000')
+    Net sel = !stack_op.push_to_mem && stack_op.push_to_reg
+    Net in_a = (operation == 5'b01000') 
     Net in_b = @mem_req.ready && (stack_op.push_mem_state || stack_op.push_to_mem)
     $signal_mux(in_a, in_b, sel, @push.grant)
     

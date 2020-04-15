@@ -2,7 +2,7 @@ mux_cfg={
   mem_req : 3,
   mem_bank: 3,
   mem_data_width : 32
-  mem_depth : 128,
+  mem_depth : 1024,
   strategy  : "round"
 }
 stack_cfg={
@@ -12,9 +12,11 @@ stack_cfg={
   mem_depth  : mux_cfg.mem_depth*mux_cfg.mem_bank
 }
 _ = require 'lodash'
+op_flow = require './op_log.coffee'
 hard_stack = importDesign('./hard_stack.chdl')
 mem_mux   = importDesign('./mem_mux.chdl')
 mem_model = importDesign('./mem_model.chdl')
+
 class hard_stack_tb extends Module
   mem_mux_u0 : new mem_mux(mux_cfg.mem_req, mux_cfg.mem_bank, mux_cfg.mem_data_width, mux_cfg.mem_depth, mux_cfg.strategy)
   constructor: ->
@@ -107,14 +109,15 @@ class hard_stack_tb extends Module
     @setDefaultClock('clk')
     @setDefaultReset('rstn')
   
-  op_push:(seq,stack_in, push_ch)->
-    data = Math.floor(Math.random()*1000)
+  op_push:(seq,stack_in, push_ch, data)->
+    
+    stack_data = data ? Math.floor(Math.random()*1000)
     seq.delay(0) =>
       assign stack_in.push.valid = 1
-      assign stack_in.push.data = data
+      assign stack_in.push.data = stack_data
     seq.polling(@clk, $ push_ch.grant) => 
       assign stack_in.push.valid = 0
-    return data
+    return stack_data
   
   check_pop_data:(seq, stack_in, pop_ch,data) ->
     seq.polling(@clk, $ pop_ch.ready) =>
@@ -129,15 +132,15 @@ class hard_stack_tb extends Module
       assign stack_in.pop.valid = 0 
       assign stack_in.pop.grant_hold = 1
       
-  op_store:(seq, stack_in, write_ch, addr)->
-    data = Math.floor(Math.random()*1000)
+  op_store:(seq, stack_in, write_ch, addr, data)->
+    stack_data = data ?  Math.floor(Math.random()*1000)
     seq.delay(0) =>
       assign stack_in.write.valid = 1
-      assign stack_in.write.data = data
+      assign stack_in.write.data = stack_data
       assign stack_in.write.addr = addr
     seq.polling(@clk, $ write_ch.grant) =>
       assign stack_in.write.valid = 0
-    return data
+    return stack_data
   
   op_load:(seq, stack_in, read_ch, addr)->
     seq.delay(0) =>
@@ -156,12 +159,20 @@ class hard_stack_tb extends Module
       assign stack_in.flush = 1
     seq.delay(@period) =>
       assign stack_in.flush = 0
-    
+  
+  random_delay:(seq) ->
+    num = Math.floor(Math.random()*10000)%10
+    seq.delay(num*@period) =>
+      str = " random delay " + num*@period
+      @display(str)
+      
+  
+  
   build: ->
     @create_clock(@clk,@period) 
     @create_resetn(@rstn)                   # there is a 100 unit time delay
     
-    
+    #console.log(op_flow) 
     for i in _.range(@mem_bank)
       $channelPortHub(@mem_port_channel[i], @mem_channel[i])
       
@@ -212,110 +223,130 @@ class hard_stack_tb extends Module
       initial
         seq = $sequence("simulation") 
         seq.delay(10) =>
-          assign stack_in[i].mem_base_addr = i*10
+          assign stack_in[i].mem_base_addr = i*200
         #console.log("while")
         seq.delay(105) =>
-          data = @op_push(seq, stack_in[i],@push_ch[i])
-          stack_data.push(data)
-          data = @op_push(seq, stack_in[i],@push_ch[i])
-          stack_data.push(data)
-          
-          @op_pop(seq,stack_in[i], @pop_ch[i])
-          pop_data_list.push(stack_data.pop()) 
-          
-          data = @op_push(seq, stack_in[i],@push_ch[i])
-          stack_data.push(data)
-          data = @op_push(seq, stack_in[i],@push_ch[i])
-          stack_data.push(data)
-          
-          data = @op_push(seq, stack_in[i],@push_ch[i])
-          stack_data.push(data)
-          data = @op_push(seq, stack_in[i],@push_ch[i])
-          stack_data.push(data)
-          
-          data = @op_store(seq, stack_in[i],@write_ch[i], 0)
-          stack_write_data.push(data)
-          stack_data.push(data)
-          data = @op_store(seq, stack_in[i],@write_ch[i], 1)
-          stack_write_data.push(data)
-          stack_data.push(data)
-          data = @op_store(seq, stack_in[i],@write_ch[i], 2)
-          stack_write_data.push(data)
-          stack_data.push(data)
-          data = @op_store(seq, stack_in[i],@write_ch[i], 3)
-          stack_write_data.push(data)
-          stack_data.push(data)
-          data = @op_store(seq, stack_in[i],@write_ch[i], 4)
-          stack_write_data.push(data)
-          stack_data.push(data)
+          for op in op_flow
+            op_list = op.split(" ")
+            console.log(op_list)
+            if op_list[0] == "push"
+              data = Number(op_list[1])
+              data = @op_push(seq, stack_in[i],@push_ch[i], data)
+            else if op_list[0] == "pop"
+              @op_pop(seq,stack_in[i], @pop_ch[i])  
+            else if op_list[0] == "write"
+              addr = Number(op_list[1])
+              data = Number(op_list[2])
+              data = @op_store(seq, stack_in[i],@write_ch[i], addr, data) 
+            else if op_list[0] == "read"
+              addr = Number(op_list[1])
+              @op_load(seq,stack_in[i],@read_ch[i],addr)
+            @random_delay(seq)
+           #data = @op_push(seq, stack_in[i],@push_ch[i], data)
+          #stack_data.push(data)
+          #data = @op_push(seq, stack_in[i],@push_ch[i])
+          #stack_data.push(data)
+          #
+          #@op_pop(seq,stack_in[i], @pop_ch[i])
+          #pop_data_list.push(stack_data.pop()) 
+          #
+          #data = @op_push(seq, stack_in[i],@push_ch[i])
+          #stack_data.push(data)
+          #data = @op_push(seq, stack_in[i],@push_ch[i])
+          #stack_data.push(data)
+          #
+          #data = @op_push(seq, stack_in[i],@push_ch[i])
+          #stack_data.push(data)
+          #data = @op_push(seq, stack_in[i],@push_ch[i])
+          #stack_data.push(data)
+          #
+          #data = @op_store(seq, stack_in[i],@write_ch[i], 0)
+          #stack_write_data.push(data)
+          #stack_data.push(data)
+          #data = @op_store(seq, stack_in[i],@write_ch[i], 1)
+          #stack_write_data.push(data)
+          #stack_data.push(data)
+          #data = @op_store(seq, stack_in[i],@write_ch[i], 2)
+          #stack_write_data.push(data)
+          #stack_data.push(data)
+          #data = @op_store(seq, stack_in[i],@write_ch[i], 3)
+          #stack_write_data.push(data)
+          #stack_data.push(data)
+          #data = @op_store(seq, stack_in[i],@write_ch[i], 4)
+          #stack_write_data.push(data)
+          #stack_data.push(data)
          # data = @op_store(seq, stack_in[i],@write_ch[i], 5)
          # stack_data[5] = data
-          console.log(stack_write_data)
+          #console.log(stack_write_data)
           
-          @op_load(seq,stack_in[i],@read_ch[i],0)
-          @op_load(seq,stack_in[i],@read_ch[i],1)
-          @op_load(seq,stack_in[i],@read_ch[i],2)
-          @op_load(seq,stack_in[i],@read_ch[i],3)
-          @op_load(seq,stack_in[i],@read_ch[i],4)
-          #@op_load(seq,stack_in[i],@read_ch[i],5)
-          
+          #@op_load(seq,stack_in[i],@read_ch[i],0)
+          #@op_load(seq,stack_in[i],@read_ch[i],1)
+          #@op_load(seq,stack_in[i],@read_ch[i],2)
+          #@op_load(seq,stack_in[i],@read_ch[i],3)
+          #@op_load(seq,stack_in[i],@read_ch[i],4)
+          ##@op_load(seq,stack_in[i],@read_ch[i],5)
+          #
+        seq.delay(10) =>
           @op_pop(seq,stack_in[i], @pop_ch[i])
-          pop_data_list.push(stack_data.pop()) 
+          pop_data_list.push(0x3) 
           @op_pop(seq,stack_in[i], @pop_ch[i])
-          pop_data_list.push(stack_data.pop()) 
+          pop_data_list.push(0x5) 
           @op_pop(seq,stack_in[i], @pop_ch[i])
-          pop_data_list.push(stack_data.pop()) 
+          pop_data_list.push(0x0) 
           @op_pop(seq,stack_in[i], @pop_ch[i])
-          pop_data_list.push(stack_data.pop()) 
-          @flush(seq, stack_in[i])
+          pop_data_list.push(0x12) 
+          #@flush(seq, stack_in[i])
           @op_pop(seq,stack_in[i], @pop_ch[i])
-          pop_data_list.push(stack_data.pop()) 
-          
-          console.log("pop data :" + pop_data_list)
+          pop_data_list.push(0x5) 
+          @op_pop(seq,stack_in[i], @pop_ch[i])
+          pop_data_list.push(0x0) 
+          #console.log("pop data :" + pop_data_list)
+          #@sim_finish()
         seq.end()
-      stack_unit.push(stack_write_data) 
+      #stack_unit.push(stack_write_data) 
       stack_unit_pop_data.push(pop_data_list) 
       
      
-    for i in _.range(@stack_num) 
-      console.log(stack_unit[i])
-      initial
-        seq = $sequence("check")
-        seq.delay(5) =>
-          
-          #pop_data = stack_unit[i][1]
-          #pop_data = stack_unit[i].pop()
-          pop_data = stack_unit_pop_data[i][0]
-          @check_pop_data(seq, stack_in[i], @pop_ch[i], pop_data) 
-          
-          load_data = stack_unit[i][0]
-          @check_load_data(seq, stack_in[i], @read_ch[i], load_data) 
-          load_data = stack_unit[i][1]
-          @check_load_data(seq, stack_in[i], @read_ch[i], load_data) 
-          load_data = stack_unit[i][2]
-          @check_load_data(seq, stack_in[i], @read_ch[i], load_data) 
-          load_data = stack_unit[i][3]
-          @check_load_data(seq, stack_in[i], @read_ch[i], load_data) 
-          load_data = stack_unit[i][4]
-          @check_load_data(seq, stack_in[i], @read_ch[i], load_data) 
-          
-          
-          pop_data = stack_unit_pop_data[i][1]
-          @check_pop_data(seq, stack_in[i], @pop_ch[i], pop_data) 
-          pop_data = stack_unit_pop_data[i][2]
-          @check_pop_data(seq, stack_in[i], @pop_ch[i], pop_data) 
-          pop_data = stack_unit_pop_data[i][3]
-          @check_pop_data(seq, stack_in[i], @pop_ch[i], pop_data) 
-          pop_data = stack_unit_pop_data[i][4]
-          @check_pop_data(seq, stack_in[i], @pop_ch[i], pop_data) 
-          pop_data = stack_unit_pop_data[i][5]
-          @check_pop_data(seq, stack_in[i], @pop_ch[i], pop_data) 
-        seq.end()
+    #for i in _.range(@stack_num) 
+    #  console.log(stack_unit[i])
+    #  initial
+    #    seq = $sequence("check")
+    #    seq.delay(5) =>
+    #      
+    #      #pop_data = stack_unit[i][1]
+    #      #pop_data = stack_unit[i].pop()
+    #      #pop_data = stack_unit_pop_data[i][0]
+    #      #@check_pop_data(seq, stack_in[i], @pop_ch[i], pop_data) 
+    #      
+    #      #load_data = stack_unit[i][0]
+    #      #@check_load_data(seq, stack_in[i], @read_ch[i], load_data) 
+    #      #load_data = stack_unit[i][1]
+    #      #@check_load_data(seq, stack_in[i], @read_ch[i], load_data) 
+    #      #load_data = stack_unit[i][2]
+    #      #@check_load_data(seq, stack_in[i], @read_ch[i], load_data) 
+    #      #load_data = stack_unit[i][3]
+    #      #@check_load_data(seq, stack_in[i], @read_ch[i], load_data) 
+    #      #load_data = stack_unit[i][4]
+    #      #@check_load_data(seq, stack_in[i], @read_ch[i], load_data) 
+    #      
+    #      pop_data = stack_unit_pop_data[i][0]
+    #      @check_pop_data(seq, stack_in[i], @pop_ch[i], pop_data) 
+    #      pop_data = stack_unit_pop_data[i][1]
+    #      @check_pop_data(seq, stack_in[i], @pop_ch[i], pop_data) 
+    #      pop_data = stack_unit_pop_data[i][2]
+    #      @check_pop_data(seq, stack_in[i], @pop_ch[i], pop_data) 
+    #      pop_data = stack_unit_pop_data[i][3]
+    #      @check_pop_data(seq, stack_in[i], @pop_ch[i], pop_data) 
+    #      pop_data = stack_unit_pop_data[i][4]
+    #      @check_pop_data(seq, stack_in[i], @pop_ch[i], pop_data) 
+    #      pop_data = stack_unit_pop_data[i][5]
+    #      @check_pop_data(seq, stack_in[i], @pop_ch[i], pop_data) 
+    #    seq.end()
        
     initial
       $sequence("finish")
-        .delay(1000) =>
-          @assert_report()
+        .delay(10000) =>
+          #@assert_report()
           @sim_finish()
         .end()
     
